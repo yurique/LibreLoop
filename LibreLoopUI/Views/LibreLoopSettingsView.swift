@@ -150,10 +150,45 @@ struct LibreLoopSettingsView: View {
             || viewModel.bleAddress != nil
             || viewModel.blePINHex != nil
             || viewModel.receiverIDHex != nil
+            || viewModel.firmwareVersion != nil
+            || viewModel.generation != nil
+            || viewModel.securityVersion != nil
+            || viewModel.region != nil
+            || viewModel.pairedWith != nil
         if hasAny {
             Section(LocalizedString("Debug Info", comment: "Settings section: debug info")) {
                 if let serial = viewModel.sensorSerial {
                     LabeledContent(LocalizedString("Serial", comment: "Sensor serial row label"), value: serial)
+                        .monospaced()
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
+                if let fw = viewModel.firmwareVersion {
+                    LabeledContent(LocalizedString("Firmware", comment: "Sensor firmware version row label"), value: fw)
+                        .monospaced()
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
+                if let gen = viewModel.generation {
+                    LabeledContent(LocalizedString("Generation", comment: "Sensor generation row label"), value: gen)
+                        .monospaced()
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
+                if let securityVersion = viewModel.securityVersion {
+                    LabeledContent(LocalizedString("Security Version", comment: "Sensor security version row label"), value: securityVersion)
+                        .monospaced()
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
+                if let region = viewModel.region {
+                    LabeledContent(LocalizedString("Region", comment: "Sensor region row label"), value: region)
+                        .monospaced()
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
+                if let pairedWith = viewModel.pairedWith {
+                    LabeledContent(LocalizedString("Paired With", comment: "Row label: pairing method, an app identity or the whitebox"), value: pairedWith)
                         .monospaced()
                         .font(.footnote)
                         .textSelection(.enabled)
@@ -640,6 +675,11 @@ final class LibreLoopSettingsViewModel: ObservableObject, LibreLoopStateObserver
     @Published private(set) var receiverIDHex: String?
     @Published private(set) var activatedAt: Date?
     @Published private(set) var sensorModel: String?
+    @Published private(set) var firmwareVersion: String?
+    @Published private(set) var generation: String?
+    @Published private(set) var securityVersion: String?
+    @Published private(set) var region: String?
+    @Published private(set) var pairedWith: String?
     @Published private(set) var minuteByMinuteForwardingEnabled: Bool
 
     init(cgmManager: LibreLoopCGMManager) {
@@ -657,7 +697,23 @@ final class LibreLoopSettingsViewModel: ObservableObject, LibreLoopStateObserver
         self.receiverIDHex = cgmManager.state.receiverID.map(Self.hex)
         self.activatedAt = cgmManager.state.activatedAt
         self.sensorModel = cgmManager.state.sensorModel
+        self.firmwareVersion = cgmManager.state.firmwareVersion
+        self.generation = cgmManager.state.generation.map(String.init)
+        self.securityVersion = cgmManager.state.securityVersion.map(String.init)
+        self.region = cgmManager.state.region.map(Self.regionName)
+        self.pairedWith = cgmManager.pairedWith
         self.minuteByMinuteForwardingEnabled = cgmManager.state.experimentalMinuteByMinuteForwarding
+    }
+
+    /// Region codes as DiaBLE names them, with the raw code kept for reports.
+    private static func regionName(_ code: UInt16) -> String {
+        switch code {
+        case 1: return "\(code) (Europe)"
+        case 2: return "\(code) (US)"
+        case 4: return "\(code) (Australia/Canada)"
+        case 8: return "\(code) (Eastern rest of world)"
+        default: return "\(code)"
+        }
     }
 
     func setMinuteByMinuteForwarding(_ enabled: Bool) {
@@ -707,6 +763,11 @@ final class LibreLoopSettingsViewModel: ObservableObject, LibreLoopStateObserver
             self.receiverIDHex = state.receiverID.map(Self.hex)
             self.activatedAt = state.activatedAt
             self.sensorModel = state.sensorModel
+            self.firmwareVersion = state.firmwareVersion
+            self.generation = state.generation.map(String.init)
+            self.securityVersion = state.securityVersion.map(String.init)
+            self.region = state.region.map(Self.regionName)
+            self.pairedWith = manager.pairedWith
             self.minuteByMinuteForwardingEnabled = state.experimentalMinuteByMinuteForwarding
         }
     }

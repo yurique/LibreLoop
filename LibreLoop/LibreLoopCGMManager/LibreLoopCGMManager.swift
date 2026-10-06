@@ -1,6 +1,6 @@
 import Foundation
 import HealthKit
-import LibreCRKit
+import RoundWhiteDiscKit
 import LoopAlgorithm
 import LoopKit
 import os.log
@@ -9,7 +9,7 @@ import UIKit
 
 public final class LibreLoopCGMManager: CGMManager {
     public static let pluginIdentifier = "LibreLoopCGMManager"
-    public static let localizedTitle = "FreeStyle Libre 3"
+    public static let localizedTitle = "FreeStyle Libre 3 / 3+"
     public static let healthKitStorageDelay: TimeInterval = 0
 
     public var localizedTitle: String { Self.localizedTitle }
@@ -19,7 +19,14 @@ public final class LibreLoopCGMManager: CGMManager {
     public var pluginIdentifier: String { Self.pluginIdentifier }
     public func markAsDepedency(_ isDependency: Bool) {}
 
-    public weak var cgmManagerDelegate: CGMManagerDelegate?
+    public weak var cgmManagerDelegate: CGMManagerDelegate? {
+        didSet { flushPendingDeviceLog() }
+    }
+
+    /// First-time pairing runs on a manager Loop hasn't adopted yet, so its
+    /// device-log lines are held until the delegate arrives.
+    private let pendingDeviceLogLock = NSLock()
+    private var pendingDeviceLog: [(identifier: String?, type: DeviceLogEntryType, message: String)] = []
     public var delegateQueue: DispatchQueue!
 
     public internal(set) var state: LibreLoopCGMManagerState
@@ -251,6 +258,12 @@ public final class LibreLoopCGMManager: CGMManager {
     /// One-shot guard so the re-scan alert fires once per failure run, not every
     /// failed attempt.
     var hasIssuedReScanAlert = false
+
+    /// Anything left standing in Loop's AlertStore replays on every app launch,
+    /// so this must list every alert we can issue.
+    static var allAlertIdentifiers: [Alert.AlertIdentifier] {
+        LibreLoopExpiryAlerts.allIdentifiers + [sensorAttentionAlertID, needsReScanAlertID]
+    }
     /// Cap on the exponential reconnect backoff (seconds) so a persistently
     /// failing/marginal link doesn't hammer the radio and drain the battery.
     static let maxReconnectBackoff: TimeInterval = 300
@@ -332,7 +345,9 @@ public final class LibreLoopCGMManager: CGMManager {
         monitor = nil
         isReconnecting = false
         recentSamples = []
-        retractExpiryAlerts()
+        hasIssuedReScanAlert = false
+        lastSensorAttention = nil
+        retractAllAlerts()
         // Emit .sensorEnd before we blank state so the event's
         // deviceIdentifier still resolves to the session that's ending.
         // Matches the .sensorStart we emitted at pairing time so Loop's
@@ -406,16 +421,27 @@ public final class LibreLoopCGMManager: CGMManager {
                  manufacturer: "Abbott",
                  model: "Libre 3",
                  hardwareVersion: nil,
-                 firmwareVersion: nil,
+                 firmwareVersion: state.firmwareVersion,
                  softwareVersion: nil,
                  localIdentifier: state.sensorSerial,
                  udiDeviceIdentifier: nil)
+    }
+
+    /// "app identity ROW", "whitebox", or nil when no session keys are saved.
+    public var pairedWith: String? {
+        let keys = state.sensorSerial.flatMap { try? LibreLoopKeychain.load(forSensorSerial: $0) }
+        return keys.map { $0.appIdentity.map { "app identity \($0)" } ?? "whitebox" }
     }
 
     public var debugDescription: String {
         """
         ## LibreLoopCGMManager
         * sensorSerial: \(state.sensorSerial ?? "nil")
+        * pairedWith: \(pairedWith ?? "unknown")
+        * securityVersion: \(state.securityVersion.map(String.init) ?? "unknown")
+        * region: \(state.region.map(String.init) ?? "unknown")
+        * appIdentitiesInstalled: \(AppIdentities.isInstalled)
+        * appIdentityPairingEnabled: \(LibreLoopDebugSettings.appIdentityPairingEnabled)
         * activatedAt: \(String(describing: state.activatedAt))
         * latestReadingTimestamp: \(String(describing: state.latestReadingTimestamp))
         """
@@ -632,7 +658,7 @@ public final class LibreLoopCGMManager: CGMManager {
             guard let self else { return }
             let lower = message.lowercased()
             let type: DeviceLogEntryType
-            if lower.contains("error") || lower.contains("fail") {
+            if lower.contains("error") || lower.contains("fail") || lower.contains("reject") {
                 type = .error
             } else if lower.contains("connect") || lower.contains("disconnect") {
                 type = .connection
@@ -640,15 +666,39 @@ public final class LibreLoopCGMManager: CGMManager {
                 type = .receive
             }
             let identifier = self.state.sensorSerial
-            let forward = { [weak self] in
-                guard let self else { return }
-                self.cgmManagerDelegate?.deviceManager(self, logEventForDeviceIdentifier: identifier, type: type, message: message, completion: nil)
+            let held: Bool = self.pendingDeviceLogLock.withLock {
+                guard self.cgmManagerDelegate == nil else { return false }
+                if self.pendingDeviceLog.count < 1000 {
+                    self.pendingDeviceLog.append((identifier, type, message))
+                }
+                return true
             }
-            if let queue = self.delegateQueue {
-                queue.async(execute: forward)
-            } else {
-                forward()
+            if !held {
+                self.forwardDeviceLog(identifier: identifier, type: type, message: message)
             }
+        }
+    }
+
+    private func flushPendingDeviceLog() {
+        guard cgmManagerDelegate != nil else { return }
+        let pending = pendingDeviceLogLock.withLock {
+            defer { pendingDeviceLog.removeAll() }
+            return pendingDeviceLog
+        }
+        for entry in pending {
+            forwardDeviceLog(identifier: entry.identifier, type: entry.type, message: entry.message)
+        }
+    }
+
+    private func forwardDeviceLog(identifier: String?, type: DeviceLogEntryType, message: String) {
+        let forward = { [weak self] in
+            guard let self else { return }
+            self.cgmManagerDelegate?.deviceManager(self, logEventForDeviceIdentifier: identifier, type: type, message: message, completion: nil)
+        }
+        if let queue = delegateQueue {
+            queue.async(execute: forward)
+        } else {
+            forward()
         }
     }
 
@@ -802,7 +852,10 @@ public final class LibreLoopCGMManager: CGMManager {
                 scanner.cancelConnection(peripheral)
             }
         }
-        completion()
+        // Retract while the delegate reference is still good: notifying it
+        // releases this manager.
+        retractAllAlerts()
+        notifyDelegateOfDeletion(completion: completion)
     }
 }
 

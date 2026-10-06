@@ -1,6 +1,6 @@
 import Foundation
 import HealthKit
-import LibreCRKit
+import RoundWhiteDiscKit
 import LoopAlgorithm
 import LoopKit
 import os.log
@@ -47,12 +47,14 @@ extension LibreLoopCGMManager {
         return activatedAt
     }
 
-    func retractExpiryAlerts() {
+    /// Captures the delegate strongly so the retraction still lands if this
+    /// manager is released immediately afterwards.
+    func retractAllAlerts() {
         let delegate = cgmManagerDelegate
-        let identifiers = LibreLoopExpiryAlerts.allIdentifiers.map {
+        let identifiers = Self.allAlertIdentifiers.map {
             Alert.Identifier(managerIdentifier: pluginIdentifier, alertIdentifier: $0)
         }
-        llog("expiry alerts: retracting \(identifiers.count) identifier(s)")
+        llog("alerts: retracting \(identifiers.count) identifier(s)")
         Task {
             for identifier in identifiers {
                 delegate?.retractAlert(identifier: identifier)
@@ -61,7 +63,7 @@ extension LibreLoopCGMManager {
     }
 
     /// Saves the NFC half of pairing the instant it completes successfully,
-    /// before any BLE work. Per LibreCRKit author guidance: a successful A8
+    /// before any BLE work. Per RoundWhiteDiscKit author guidance: a successful A8
     /// burns the previous BLE PIN and issues a new one in the response, so
     /// the new PIN MUST be persisted before we touch BLE -- a crash or
     /// handshake failure must not leave the sensor stranded.
@@ -88,6 +90,15 @@ extension LibreLoopCGMManager {
         if let gen = response.generation {
             newState.generation = gen
         }
+        if let securityVersion = response.securityVersion {
+            newState.securityVersion = securityVersion
+        }
+        if let region = response.region {
+            newState.region = region
+        }
+        if let fw = response.firmwareVersion {
+            newState.firmwareVersion = fw
+        }
         setState(newState)
     }
 
@@ -101,7 +112,8 @@ extension LibreLoopCGMManager {
                 kEnc: outcome.result.kEnc,
                 ivEnc: outcome.result.ivEnc,
                 phase5RawKey: outcome.result.phase5RawKey,
-                receiverID: Self.receiverIDFromState(state.receiverID)
+                receiverID: Self.receiverIDFromState(state.receiverID),
+                appIdentity: outcome.result.appIdentity
             ),
             forSensorSerial: outcome.result.sensorSerial
         )
@@ -334,7 +346,7 @@ extension LibreLoopCGMManager {
     private func notifySensorAttentionIfNeeded(_ status: PatchStatus) {
         // A code-7 "transmission error" (`Libre3SensorError.transmissionError`)
         // is a transient comms fault, not a terminal replace condition — the
-        // sensor keeps producing valid glucose. LibreCRKit's coarse attention
+        // sensor keeps producing valid glucose. RoundWhiteDiscKit's coarse attention
         // mapping lumps code 7 in with code 8 (terminated) as `.replaceSensor`;
         // downgrade it here to a soft, retractable `.checkSensor` notice so it
         // never marks the sensor inoperable or stops Loop.
@@ -706,7 +718,7 @@ extension LibreLoopCGMManager {
         let realtimeLifeCounts = Set(recentSamples.map { $0.lifeCount })
 
         // Forward only the per-minute `currentGlucoseMgDL` at
-        // `record.lifeCount`. Per upstream LibreCRKit guidance:
+        // `record.lifeCount`. Per upstream RoundWhiteDiscKit guidance:
         // `currentGlucose` is keyed at lifeCount (offset 0) and safe
         // to plot at its own time, while `historicGlucoseRaw` is
         // redundant with the historical samples embedded in realtime
@@ -989,7 +1001,8 @@ extension LibreLoopCGMManager {
         }
         // Pull whatever we previously persisted, but reconnect can still run
         // if Keychain has nothing — it'll just use the full handshake path.
-        let cachedPhase5 = (try? LibreLoopKeychain.load(forSensorSerial: serial))?.phase5RawKey
+        let cachedKeys = try? LibreLoopKeychain.load(forSensorSerial: serial)
+        let cachedPhase5 = cachedKeys?.phase5RawKey
         if cachedPhase5 != nil {
             llog("reconnect: cached phase5RawKey available; will try fast path first")
         } else {
@@ -1000,6 +1013,7 @@ extension LibreLoopCGMManager {
                 scanner: scanner,
                 blePIN: blePIN,
                 phase5RawKey: cachedPhase5,
+                appIdentity: cachedKeys?.appIdentity,
                 expectedPeripheralID: expectedPeripheral
             ) { [weak self] stage in
                 llog("reconnect stage: \(String(describing: stage))")
@@ -1013,7 +1027,8 @@ extension LibreLoopCGMManager {
                     kEnc: outcome.kEnc,
                     ivEnc: outcome.ivEnc,
                     phase5RawKey: phase5ToPersist,
-                    receiverID: Self.receiverIDFromState(state.receiverID)
+                    receiverID: Self.receiverIDFromState(state.receiverID),
+                    appIdentity: outcome.phase5RawKey == nil ? cachedKeys?.appIdentity : nil
                 ),
                 forSensorSerial: serial
             )
